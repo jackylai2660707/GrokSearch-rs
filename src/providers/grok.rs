@@ -3,7 +3,7 @@ use crate::adapters::grok_responses_response::parse_grok_responses;
 use crate::credentials::{CredentialProvider, StaticApiKeyCredential};
 use crate::error::Result;
 use crate::model::search::{SearchRequest, SearchResponse};
-use crate::providers::http::{build_client, post_json};
+use crate::providers::http::{build_client, post_json_with_status};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,14 +78,29 @@ impl GrokResponsesProvider {
         let payload =
             to_grok_responses_payload(request, self.require_web_search, self.include_x_search)?;
         let token = self.credential.bearer_token().await?;
-        let raw = post_json(
-            &self.client,
-            &self.endpoint(),
-            &token,
-            &payload,
-            "Grok Responses",
-        )
-        .await?;
-        parse_grok_responses(&raw)
+        let endpoint = self.endpoint();
+
+        // Multi-agent models can transiently return HTTP 429 while an upstream
+        // worker is busy. Retry only that status, using short exponential
+        // backoff; other failures are returned immediately.
+        for attempt in 0..4 {
+            match post_json_with_status(
+                &self.client,
+                &endpoint,
+                &token,
+                &payload,
+                "Grok Responses",
+            )
+            .await
+            {
+                Ok(raw) => return parse_grok_responses(&raw),
+                Err(failure) if failure.status == Some(429) && attempt < 3 => {
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(failure) => return Err(failure.error),
+            }
+        }
+
+        unreachable!("retry loop always returns on its final attempt")
     }
 }
