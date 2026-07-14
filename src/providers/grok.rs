@@ -94,7 +94,11 @@ impl GrokResponsesProvider {
             .await
             {
                 Ok(raw) => return parse_grok_responses(&raw),
-                Err(failure) if failure.status == Some(429) && attempt < 3 => {
+                Err(failure)
+                    if attempt < 3
+                        && (failure.status.is_none()
+                            || matches!(failure.status, Some(429 | 500 | 502 | 503 | 504))) =>
+                {
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 }
                 Err(failure) => return Err(failure.error),
