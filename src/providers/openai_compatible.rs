@@ -3,7 +3,7 @@ use crate::adapters::chat_completions_response::parse_chat_completions;
 use crate::config::normalize_v1_base;
 use crate::error::Result;
 use crate::model::search::{SearchRequest, SearchResponse};
-use crate::providers::http::{build_client, post_json};
+use crate::providers::http::{build_client, post_json_with_status};
 use reqwest::Client;
 use std::time::Duration;
 
@@ -70,14 +70,33 @@ impl OpenAICompatProvider {
             request.model.as_str()
         };
         let payload = to_chat_completions_payload(request, model, self.include_web_search_tool);
-        let raw = post_json(
-            &self.client,
-            &self.endpoint(),
-            &self.api_key,
-            &payload,
-            "OpenAI-compatible",
-        )
-        .await?;
-        parse_chat_completions(&raw)
+        let endpoint = self.endpoint();
+
+        // Relays may transiently rate-limit or lose an upstream worker.
+        // Retry temporary failures with bounded exponential backoff, while
+        // returning authentication and other permanent 4xx errors immediately.
+        for attempt in 0..4 {
+            match post_json_with_status(
+                &self.client,
+                &endpoint,
+                &self.api_key,
+                &payload,
+                "OpenAI-compatible",
+            )
+            .await
+            {
+                Ok(raw) => return parse_chat_completions(&raw),
+                Err(failure)
+                    if attempt < 3
+                        && (failure.status.is_none()
+                            || matches!(failure.status, Some(429 | 500 | 502 | 503 | 504))) =>
+                {
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+                Err(failure) => return Err(failure.error),
+            }
+        }
+
+        unreachable!("retry loop always returns on its final attempt")
     }
 }
