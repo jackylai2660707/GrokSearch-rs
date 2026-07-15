@@ -646,11 +646,27 @@ impl SearchService {
     }
 
     pub async fn web_map(&self, url: &str, max_results: usize) -> Result<Vec<Source>> {
-        self.sources
-            .as_ref()
-            .ok_or(GrokSearchError::MissingConfig("TAVILY_API_KEY"))?
-            .map(url, max_results)
-            .await
+        let mut primary_error = None;
+        if let Some(provider) = &self.sources {
+            match provider.map(url, max_results).await {
+                Ok(sources) if !sources.is_empty() => return Ok(sources),
+                Ok(_) => {
+                    primary_error = Some(GrokSearchError::Provider(
+                        "primary map provider returned no sources".to_string(),
+                    ));
+                }
+                Err(err) => primary_error = Some(err),
+            }
+        }
+        if let Some(provider) = &self.fallback_sources {
+            return provider.map(url, max_results).await;
+        }
+        if let Some(err) = primary_error {
+            return Err(err);
+        }
+        Err(GrokSearchError::MissingConfig(
+            "TAVILY_API_KEY or FIRECRAWL_API_KEY",
+        ))
     }
 
     /// Runtime diagnostics with live connectivity probes against each configured backend.
