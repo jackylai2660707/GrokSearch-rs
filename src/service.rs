@@ -934,15 +934,23 @@ async fn generic_source_fetch(
     fallback: &Option<Arc<dyn SourceProvider>>,
     url: &str,
 ) -> Result<String> {
+    let mut primary_error = None;
     if let Some(provider) = primary {
-        if let Ok(content) = provider.fetch(url).await {
-            if !content.trim().is_empty() {
-                return Ok(content);
+        match provider.fetch(url).await {
+            Ok(content) if !content.trim().is_empty() => return Ok(content),
+            Ok(_) => {
+                primary_error = Some(GrokSearchError::Provider(
+                    "primary fetch provider returned empty content".to_string(),
+                ));
             }
+            Err(err) => primary_error = Some(err),
         }
     }
     if let Some(provider) = fallback {
         return provider.fetch(url).await;
+    }
+    if let Some(err) = primary_error {
+        return Err(err);
     }
     Err(GrokSearchError::MissingConfig(
         "TAVILY_API_KEY or FIRECRAWL_API_KEY",
